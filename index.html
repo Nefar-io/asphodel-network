@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <!-- saved from url=(0046)https://interventionforceasphodel.netlify.app/ -->
 <html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
@@ -1705,6 +1706,7 @@ var defaultIntel={
   audit:['[05:14Z] CENTRAL INTEL STORE RESTORED FROM LOCAL TERMINAL','[05:19Z] NOTE ATTACHED: DO NOT ARCHIVE COFFEE MACHINE AS NODE FAILURE']
 };
 var intel=loadData('asphodelIntelV3',defaultIntel);
+intel=normalizeIntel(intel);
 if(!intel.version||intel.version<3){intel=defaultIntel;saveData('asphodelIntelV3',intel);}
 var operators=intel.operators,subjects=intel.subjects,opAudit=intel.audit,trackAudit=intel.audit;
 function saveIntel(){saveData('asphodelIntelV3',intel);schedulePush();}
@@ -1995,6 +1997,7 @@ var defaultBrief={
 };
 var brief=loadData('asphodelMissionBriefV1',defaultBrief);
 if(!brief.version||brief.version<1)brief=JSON.parse(JSON.stringify(defaultBrief));
+brief=normalizeBrief(brief);
 function saveBrief(){saveData('asphodelMissionBriefV1',brief);schedulePush();}
 function markUnpublished(){if(brief.published){brief.published=false;saveBrief();}updateBriefStatus();}
 function updateBriefStatus(){
@@ -2123,6 +2126,7 @@ function renderBrief(){
 
 /* ── PUBLISHED MISSIONS // SIDE TAB REGISTRY ── */
 var missions=loadData('asphodelMissionsV1',[]);
+if(!Array.isArray(missions))missions=[];
 function saveMissions(){saveData('asphodelMissionsV1',missions);schedulePush();}
 function missionSeq(){
   var n=0;
@@ -2313,23 +2317,32 @@ function goTo(id){
     from.style.opacity='';
     to.style.opacity='0';
     to.classList.add('active');
-    var s=to.querySelector('.ps');
-    if(s)s.scrollTop=0;
-    /* re-apply live data every time these pages are opened */
-    var d=threatData[activeLevel];
-    if(id==='brief')renderBrief();
-    if(id==='mission-dossier')renderMissionDossier();
-    if(id==='alert')applyDirectivePage(d);
-    if(id==='eclipse')applyEclipsePage(d);
-    if(id==='operators')renderOperators();
-    if(id==='tracking')renderTracking();
-    if(id==='archive')renderArchive();
-    if(id==='messages')renderMessages();
-    if(id==='logs')startLogFeed();
-    if(id==='site')renderSite();
-    if(id==='modules')renderModules();
-    setTimeout(function(){to.style.opacity='';},20);
-    cur=id;
+    /* Everything below can fail (bad synced data, a null field, etc.).
+       Wrapped so a render error can never leave a tab permanently
+       invisible — worst case you see a blank/stale tab instead of a
+       black hole, and the real error is logged for diagnosis. */
+    try{
+      var s=to.querySelector('.ps');
+      if(s)s.scrollTop=0;
+      /* re-apply live data every time these pages are opened */
+      var d=threatData[activeLevel];
+      if(id==='brief')renderBrief();
+      if(id==='mission-dossier')renderMissionDossier();
+      if(id==='alert')applyDirectivePage(d);
+      if(id==='eclipse')applyEclipsePage(d);
+      if(id==='operators')renderOperators();
+      if(id==='tracking')renderTracking();
+      if(id==='archive')renderArchive();
+      if(id==='messages')renderMessages();
+      if(id==='logs')startLogFeed();
+      if(id==='site')renderSite();
+      if(id==='modules')renderModules();
+    }catch(err){
+      console.error('[goTo] failed to render tab "'+id+'":',err);
+    }finally{
+      setTimeout(function(){to.style.opacity='';},20);
+      cur=id;
+    }
   },320);
   document.querySelectorAll('.nb').forEach(function(b,i){
     b.classList.toggle('on',ids[i]===id);
@@ -2821,8 +2834,12 @@ function schedulePush(){
 
 function mergeArraysById(remote,local){
   var out={},order=[];
-  (remote||[]).forEach(function(x){if(x&&x.id!=null){if(!(x.id in out))order.push(x.id);out[x.id]=x;}});
-  (local||[]).forEach(function(x){if(x&&x.id!=null){if(!(x.id in out))order.push(x.id);out[x.id]=x;}});
+  /* Firebase silently prunes empty arrays/objects from stored data
+     (a [] we wrote can come back as undefined, or a keyed object
+     instead of a real array), so never trust the shape of anything
+     that came from the network — only merge what's actually an array. */
+  (Array.isArray(remote)?remote:[]).forEach(function(x){if(x&&x.id!=null){if(!(x.id in out))order.push(x.id);out[x.id]=x;}});
+  (Array.isArray(local)?local:[]).forEach(function(x){if(x&&x.id!=null){if(!(x.id in out))order.push(x.id);out[x.id]=x;}});
   return order.map(function(id){return out[id];});
 }
 
@@ -2830,8 +2847,38 @@ function mergeArraysById(remote,local){
    union the two lists, drop exact duplicates, keep newest-first order. */
 function mergeAuditLists(remote,local){
   var seen={},out=[];
-  (local||[]).concat(remote||[]).forEach(function(s){if(s&&!seen[s]){seen[s]=true;out.push(s);}});
+  (Array.isArray(local)?local:[]).concat(Array.isArray(remote)?remote:[]).forEach(function(s){if(s&&!seen[s]){seen[s]=true;out.push(s);}});
   return out;
+}
+
+/* Firebase deletes empty arrays/objects from stored data instead of
+   keeping them as [] / {}, so anything pulled from the shared feed
+   can be missing fields entirely — and dozens of render functions
+   call .map/.filter/.forEach directly on intel.* and brief.* fields
+   with no guard. Rebuilding through here guarantees every expected
+   field exists with the right type before it's ever touched. */
+function normalizeIntel(obj){
+  obj=(obj&&typeof obj==='object')?obj:{};
+  var arr=function(v){return Array.isArray(v)?v:[];};
+  return {
+    version:obj.version||3,
+    operators:arr(obj.operators),
+    subjects:arr(obj.subjects),
+    incidents:arr(obj.incidents),
+    messages:arr(obj.messages),
+    logs:arr(obj.logs),
+    alerts:arr(obj.alerts),
+    modules:arr(obj.modules),
+    site:(obj.site&&typeof obj.site==='object')?obj.site:{},
+    audit:arr(obj.audit)
+  };
+}
+function normalizeBrief(obj){
+  obj=(obj&&typeof obj==='object')?obj:{};
+  return Object.assign({},defaultBrief,obj,{
+    objectives:Array.isArray(obj.objectives)?obj.objectives:defaultBrief.objectives.slice(),
+    deployed:(obj.deployed&&typeof obj.deployed==='object')?obj.deployed:{}
+  });
 }
 
 /* Merges one intel store into another. Whichever side is passed as
@@ -2893,17 +2940,27 @@ function pushSharedState(){
 function pullSharedState(){
   if(!syncEnabled()||syncBusy)return;
   syncBusy=true;
-  fetch(SHARED_FEED_URL,{cache:'no-store'}).then(function(r){return r.json();}).then(function(data){
+  fetch(SHARED_FEED_URL,{cache:'no-store'}).then(function(r){
+    return r.text().then(function(txt){
+      var parsed=null;try{parsed=txt?JSON.parse(txt):null;}catch(e){}
+      if(!r.ok){
+        var msg=(parsed&&parsed.error)?parsed.error:('HTTP '+r.status);
+        console.error('[pullSharedState] request rejected:',msg,'— raw body:',txt);
+        throw new Error(msg);
+      }
+      return parsed;
+    });
+  }).then(function(data){
     syncBusy=false;
     /* An empty database is seeded by the first visitor automatically. */
     if(!data){pushSharedState();setSyncStatus(true);return;}
     if(data.updatedAt&&data.updatedAt<=syncLastStamp){setSyncStatus(true);return;}
     syncLastStamp=data.updatedAt||Date.now();
     syncSuppressPush=true;
-    if(data.missions)missions=data.missions;
-    if(data.intel)intel=data.intel;
-    else if(data.liveLog)intel.logs=data.liveLog; /* back-compat with the old feed schema */
-    if(data.brief)brief=data.brief;
+    if(Array.isArray(data.missions))missions=data.missions;
+    if(data.intel&&typeof data.intel==='object')intel=normalizeIntel(data.intel);
+    else if(Array.isArray(data.liveLog))intel.logs=data.liveLog; /* back-compat with the old feed schema */
+    if(data.brief&&typeof data.brief==='object')brief=normalizeBrief(data.brief);
     saveData('asphodelMissionsV1',missions);
     saveData('asphodelIntelV3',intel);
     saveData('asphodelMissionBriefV1',brief);
@@ -2914,7 +2971,7 @@ function pullSharedState(){
     }
     syncSuppressPush=false;
     setSyncStatus(true);
-  }).catch(function(){syncBusy=false;setSyncStatus(false);});
+  }).catch(function(err){syncBusy=false;console.error('[pullSharedState] sync failed:',err&&err.message?err.message:err);setSyncStatus(false);});
 }
 
 setSyncStatus(false);
